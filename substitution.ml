@@ -1,11 +1,12 @@
 open Tast
 open Misc
-open Context
 
 (* La substitution triviale *)
 let subst0 () = Smap.empty
 
-(* tparam_type list -> typerType list -> substitution *)
+(* Fabrique une subtitution à l'aide d'une liste de paramètres de type de classe
+ * et d'une liste de types.
+ * tparam_type list -> typerType list -> substitution *)
 let subst_from_lists tpts ts = 
   let rec aux m = function 
     | [], []          ->  m
@@ -15,47 +16,35 @@ let subst_from_lists tpts ts =
             "dans subst_from_lists, ce n'est pas normal.")
   in aux Smap.empty (tpts, ts)
 
-
-(* Le type Array[String]
- * loc -> tclasse *)
-let array_tc l =
-  let tptcs = [{
-    tptc_cont = TPTCrien {
-      tpt_cont = ("S", None);
-      tpt_loc = l 
-      };
-    tptc_loc = l
-    }] in {
-  cc_name   = "Array";
-  cc_tptcs  = tptcs;
-  cc_params = [];
-  cc_deriv  = None;
-  cc_env = (add_classe_env (env0 ()) {
-    cc_name   = "S";
-    cc_tptcs  = [];
-    cc_params = [];
-    cc_deriv  = None;
-    cc_env    = env0 ()
-  })
-}
-
-(* Ajout d'une valeur à une substitution en vue d'une composition .*)
+(* Ajout d'une valeur à une substitution. Utilisée seulement pour la définition
+ * d'une composition.
+ * ident -> typerType -> substitution -> substitution *)
 let rec add_one_key id t m = 
-  let f = function
+  let f id' = function 
     | Tclasse (cid, s) ->
-        if cid = id then
-          t
+        if id' = id then
+          if cid = id then
+            t
+          else
+            Tclasse (cid, add_one_key id t s)
         else
-          Tclasse (cid, add_one_key id t s)          
+          if id = cid then
+            t
+          else 
+            Tclasse (cid, add_one_key id t s)
     | t' -> t'
-  in let m' = Smap.map f m in
-  Smap.add id t m'
+  in let m' = Smap.mapi f m in
+  if Smap.exists (fun i _ -> i = id) m' then
+    m'
+  else
+    Smap.add id t m'
 
-(* Composition des substitutions *)
-let subst_compose s s' = Smap.fold add_one_key s s'
+(* Composition des substitutions.
+ * substitution -> substitution -> substitution *)
+let subst_compose = Smap.fold add_one_key
 
-(* fonction de substitution
- * subst : substitution -> typerType -> typerType *)
+(* Applique une substitution à un type.
+ * substitution -> typerType -> typerType *)
 let subst s = function
   | Tclasse (cid, s') ->
       begin try 
@@ -82,7 +71,8 @@ let rec subst_acc s a = match a.ta_cont with
       }
 
 (* Substitution de tous les types qui apparaissent dans une expression...
- * Oui c'est violent, mais on n'a pas trouvé de meilleure solution.
+ * Oui c'est violent, mais on n'a pas trouvé de meilleure solution pour
+ * l'héritage.
  * substitution -> texpr -> texpr *)
 and subst_expr s e =
   let cont = match e.te_cont with
@@ -199,4 +189,60 @@ let subst_cvar s = function
   | CVar(i, t) -> CVar (i, subst s t)
   | CVal(i, t) -> CVal (i, subst s t)
 
+(* Adapte une variable héritée à la classe fille.
+ * substitution -> context_var -> context_var *)
+let update_var = subst_cvar
+
+(* Adapte une contrainte d'un environnement de méthode héritée à la classe
+ * fille.
+ * substitution -> constr -> constr *)
+let update_constr s (i, t) = (i, subst s t)
+
+(* Adapte une classe d'un environnement de classe héritée à la classe fille.
+ * substitution -> context_classe -> context_classe *)
+let rec update_classe s c = {
+  cc_name = c.cc_name;
+  cc_tptcs = List.map (subst_tptc s) c.cc_tptcs;
+  cc_params = List.map (subst_param s) c.cc_params;
+  cc_deriv =
+    begin match c.cc_deriv with
+      | None -> None
+      | Some (t, es) -> 
+          Some (subst s t, List.map (subst_expr s) es)
+    end;
+  cc_env = update_env s c.cc_env;
+}
+
+(* Adapte l'environnement d'une méthode héritée en vue de l'ajout à une classe
+ * fille.
+ * substitution -> context -> context *)
+and update_env s env = {
+  classes = List.map (update_classe s) env.classes;
+  constrs = List.map (update_constr s) env.constrs; 
+  vars    = List.map (update_var s) env.vars;
+  meths   = List.map (update_meth s) env.meths;
+}
+
+(* Adapte les méthodes héritées pour les ajouter à l'environnement d'une classe.
+ * substitution -> tmethode -> tmethode  *)
+and update_meth s m = 
+  let subst_param p = {
+    tp_name = p.tp_name;
+    tp_typ = subst s p.tp_typ;
+    tp_loc = p.tp_loc;
+  } in
+  let params = List.map subst_param m.tm_params in
+  let res_type = subst s m.tm_res_type in
+  let res_expr = subst_expr s m.tm_res_expr in
+  let env = update_env s m.tm_env in
+  {
+    tm_name         = m.tm_name;
+    tm_override     = m.tm_override;
+    tm_type_params  = m.tm_type_params;
+    tm_params       = params;
+    tm_res_type     = res_type;
+    tm_res_expr     = res_expr;
+    tm_loc          = m.tm_loc;
+    tm_env          = env;
+  }
 
